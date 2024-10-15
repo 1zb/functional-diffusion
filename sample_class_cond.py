@@ -1,43 +1,53 @@
-import argparse
-import math
+from tqdm import tqdm
+from pathlib import Path
+import util.misc as misc
+from util.shapenet import ShapeNet, category_ids
 
-import numpy as np
+import models_ae as models_ae
 
 import mcubes
-
-import torch
-
 import trimesh
+from scipy.spatial import cKDTree as KDTree
+import numpy as np
+import torchvision.transforms as T
+import torch.backends.cudnn as cudnn
+import torch.nn.functional as F
+import torch
+import yaml
+import math
 
-import models_class_cond, models_ae
+import argparse
 
-from pathlib import Path
+parser = argparse.ArgumentParser()
+parser.add_argument('--model', default='Diffusion', type=str,
+                    metavar='MODEL', help='Name of model to train')
+parser.add_argument(
+    '--pth', default='output/checkpoint-130.pth', type=str)
+parser.add_argument('--device', default='cuda',
+                    help='device to use for training / testing')
+parser.add_argument('--seed', default=0, type=int)
+args = parser.parse_args()
 
 
-if __name__ == "__main__":
+# import utils
 
-    parser = argparse.ArgumentParser('', add_help=False)
-    parser.add_argument('--ae', type=str, required=True) # 'kl_d512_m512_l16'
-    parser.add_argument('--ae-pth', type=str, required=True) # 'output/ae/kl_d512_m512_l16/checkpoint-199.pth'
-    parser.add_argument('--dm', type=str, required=True) # 'kl_d512_m512_l16_edm'
-    parser.add_argument('--dm-pth', type=str, required=True) # 'output/uncond_dm/kl_d512_m512_l16_edm/checkpoint-999.pth'
-    args = parser.parse_args()
+
+def main():
     print(args)
+    seed = args.seed
+    torch.manual_seed(seed)
+    np.random.seed(seed)
 
-    Path("class_cond_obj/{}".format(args.dm)).mkdir(parents=True, exist_ok=True)
+    cudnn.benchmark = True
 
-    device = torch.device('cuda:0')
+    model = models_ae.__dict__[args.model]()
+    device = torch.device(args.device)
 
-    ae = models_ae.__dict__[args.ae]()
-    ae.eval()
-    ae.load_state_dict(torch.load(args.ae_pth)['model'])
-    ae.to(device)
-
-    model = models_class_cond.__dict__[args.dm]()
     model.eval()
-
-    model.load_state_dict(torch.load(args.dm_pth)['model'])
+    model.load_state_dict(torch.load(args.pth, map_location='cpu')[
+                          'model'], strict=True)
     model.to(device)
+    # print(model)
 
     density = 128
     gap = 2. / density
@@ -45,31 +55,23 @@ if __name__ == "__main__":
     y = np.linspace(-1, 1, density+1)
     z = np.linspace(-1, 1, density+1)
     xv, yv, zv = np.meshgrid(x, y, z)
-    grid = torch.from_numpy(np.stack([xv, yv, zv]).astype(np.float32)).view(3, -1).transpose(0, 1)[None].to(device, non_blocking=True)
-
-    total = 1000
-    iters = 100
-
+    grid = torch.from_numpy(np.stack([xv, yv, zv]).astype(np.float32)).view(3, -1).transpose(0, 1)[None].cuda()
 
     with torch.no_grad():
-        for category_id in [18]:
-            print(category_id)
-            for i in range(1000//iters):
-                sampled_array = model.sample(cond=torch.Tensor([category_id]*iters).long().to(device), batch_seeds=torch.arange(i*iters, (i+1)*iters).to(device)).float()
+        for idx in range(16):
 
-                print(sampled_array.shape, sampled_array.max(), sampled_array.min(), sampled_array.mean(), sampled_array.std())
+            categories = torch.Tensor([0] * 1).int().cuda()
+            outputs = model.sample(categories, grid.expand(1, -1, -1), n_steps=64)
 
-                for j in range(sampled_array.shape[0]):
-                    
-                    logits = ae.decode(sampled_array[j:j+1], grid)
+            output = outputs[0]
+            volume = output.view(density+1, density+1, density+1).permute(1, 0, 2).cpu().numpy() * (-1)
 
-                    logits = logits.detach()
-                    
-                    volume = logits.view(density+1, density+1, density+1).permute(1, 0, 2).cpu().numpy()
-                    verts, faces = mcubes.marching_cubes(volume, 0)
+            verts, faces = mcubes.marching_cubes(volume, 0)
+            verts *= gap
+            verts -= 1.
+            m = trimesh.Trimesh(verts, faces)
 
-                    verts *= gap
-                    verts -= 1
+            m.export('samples/{:03d}.obj'.format(idx))
 
-                    m = trimesh.Trimesh(verts, faces)
-                    m.export('class_cond_obj/{}/{:02d}-{:05d}.obj'.format(args.dm, category_id, i*iters+j))
+if __name__ == '__main__':
+    main()
