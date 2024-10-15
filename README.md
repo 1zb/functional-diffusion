@@ -1,0 +1,1 @@
+torchrun --nproc_per_node=4 main_ae.py     --accum_iter=1    --model Diffusion     --output_dir output     --log_dir output     --num_workers 16     --point_cloud_size 2048     --batch_size 16    --epochs 1000     --warmup_epochs 1 --data_path /data/path --blr 5e-5
